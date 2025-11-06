@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "MJ Auto Batcher",
+  "version": "2.0.3",
+  "description": "Batch prompts to Midjourney with auto-download and floating panel",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting",
+    "downloads"
+  ],
+  "host_permissions": [
+    "https://www.midjourney.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.midjourney.com/*"],
+      "js": ["content.js", "floating.js"],
+      "css": ["floating.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "MJ Auto Batcher",
+    "default_popup": "popup.html"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "128": "icons/icon128.png"
+  }
+}

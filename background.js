@@ -1,0 +1,455 @@
+// ===========================
+// MJ Auto Batcher - Background Service Worker
+// ===========================
+
+let queue = [];
+let currentJob = null;
+let isRunning = false;
+let isPaused = false;
+let jobHistory = [];
+let downloadedImages = new Set(); // Track đã tải
+
+// Random delay để tránh bị detect là bot
+const MIN_DELAY = 3000;  // 3 giây
+const MAX_DELAY = 8000;  // 8 giây
+
+function getRandomDelay() {
+  const delay = Math.floor(Math.random() * (MAX_DELAY - MIN_DELAY + 1)) + MIN_DELAY;
+  console.log(`🎲 Random delay: ${delay}ms (${(delay/1000).toFixed(1)}s)`);
+  return delay;
+}
+
+const MAX_HISTORY = 100;
+
+// ===========================
+// State Management
+// ===========================
+
+async function loadState() {
+  try {
+    const data = await chrome.storage.local.get(['queue', 'jobHistory', 'downloadedImages']);
+    if (data.queue) queue = data.queue;
+    if (data.jobHistory) jobHistory = data.jobHistory;
+    if (data.downloadedImages) downloadedImages = new Set(data.downloadedImages);
+    console.log('State loaded:', { 
+      queueLength: queue.length, 
+      historyLength: jobHistory.length,
+      downloadedCount: downloadedImages.size
+    });
+  } catch (error) {
+    console.error('Failed to load state:', error);
+  }
+}
+
+async function saveState() {
+  try {
+    await chrome.storage.local.set({ 
+      queue: queue,
+      jobHistory: jobHistory.slice(-MAX_HISTORY),
+      downloadedImages: Array.from(downloadedImages).slice(-1000) // Giữ 1000 URLs gần nhất
+    });
+  } catch (error) {
+    console.error('Failed to save state:', error);
+  }
+}
+
+// ===========================
+// Queue Management
+// ===========================
+
+function addJob(job) {
+  const newJob = {
+    id: Date.now() + Math.random(),
+    ...job,
+    status: 'pending',
+    createdAt: new Date().toISOString()
+  };
+  
+  // Validate job type
+  if (!['text2image', 'image2video'].includes(newJob.type)) {
+    newJob.type = 'text2image'; // Default
+  }
+  
+  queue.push(newJob);
+  saveState();
+  broadcastState();
+  return newJob;
+}
+
+function removeJob(jobId) {
+  const index = queue.findIndex(j => j.id === jobId);
+  if (index !== -1) {
+    queue.splice(index, 1);
+    saveState();
+    broadcastState();
+    return true;
+  }
+  return false;
+}
+
+function clearQueue() {
+  queue = [];
+  currentJob = null;
+  saveState();
+  broadcastState();
+}
+
+function addToHistory(job) {
+  jobHistory.unshift({
+    ...job,
+    completedAt: new Date().toISOString()
+  });
+  if (jobHistory.length > MAX_HISTORY) {
+    jobHistory = jobHistory.slice(0, MAX_HISTORY);
+  }
+  saveState();
+}
+
+// ===========================
+// Queue Processing
+// ===========================
+
+async function startQueue() {
+  if (isRunning) {
+    console.log('Queue already running');
+    return;
+  }
+
+  isRunning = true;
+  isPaused = false;
+  broadcastState();
+
+  console.log('Starting queue processing...');
+  await processQueue();
+}
+
+async function processQueue() {
+  while (isRunning && queue.length > 0) {
+    if (isPaused) {
+      await sleep(1000);
+      continue;
+    }
+
+    currentJob = queue[0];
+    currentJob.status = 'processing';
+    broadcastState();
+
+    try {
+      console.log('Processing job:', currentJob);
+      
+      // Gửi job đến content script
+      const tabs = await chrome.tabs.query({ 
+        url: 'https://www.midjourney.com/*',
+        active: true 
+      });
+
+      if (tabs.length === 0) {
+        throw new Error('No active Midjourney tab found. Please open https://www.midjourney.com/imagine');
+      }
+
+      const tab = tabs[0];
+      
+      // Gửi message đến content script với better error handling
+      try {
+        const response = await chrome.tabs.sendMessage(tab.id, {
+          type: 'EXECUTE_JOB',
+          job: currentJob
+        });
+        
+        // Check if response indicates immediate failure
+        if (response && !response.success) {
+          throw new Error(response.error || 'Job execution failed');
+        }
+      } catch (sendError) {
+        // If message send fails, don't fail the job yet
+        // The job might still complete via JOB_COMPLETED message
+        console.warn('Message send error (may be normal for long jobs):', sendError.message);
+      }
+
+      // Đợi kết quả (via JOB_COMPLETED or JOB_FAILED messages)
+      await waitForJobCompletion(currentJob.id);
+
+      // Job thành công
+      currentJob.status = 'completed';
+      addToHistory(currentJob);
+      queue.shift();
+      saveState();
+
+      console.log('Job completed:', currentJob.id);
+
+      // Random delay trước khi job tiếp theo (tránh bị detect)
+      if (queue.length > 0) {
+        const delay = getRandomDelay();
+        console.log(`⏳ Waiting ${delay}ms before next job...`);
+        await sleep(delay);
+      }
+
+    } catch (error) {
+      console.error('Job failed:', error);
+      currentJob.status = 'failed';
+      currentJob.error = error.message;
+      addToHistory(currentJob);
+      queue.shift();
+      saveState();
+    }
+
+    broadcastState();
+  }
+
+  isRunning = false;
+  currentJob = null;
+  broadcastState();
+  console.log('Queue processing completed');
+}
+
+function waitForJobCompletion(jobId, timeout = 120000) {
+  return new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      cleanup();
+      reject(new Error('Job timeout after 2 minutes'));
+    }, timeout);
+
+    const listener = (message, sender) => {
+      if (message.type === 'JOB_COMPLETED' && message.jobId === jobId) {
+        cleanup();
+        resolve(message.result);
+      } else if (message.type === 'JOB_FAILED' && message.jobId === jobId) {
+        cleanup();
+        reject(new Error(message.error || 'Job failed'));
+      }
+    };
+
+    function cleanup() {
+      clearTimeout(timeoutId);
+      chrome.runtime.onMessage.removeListener(listener);
+    }
+
+    chrome.runtime.onMessage.addListener(listener);
+  });
+}
+
+function pauseQueue() {
+  isPaused = true;
+  broadcastState();
+  console.log('Queue paused');
+}
+
+function resumeQueue() {
+  isPaused = false;
+  broadcastState();
+  console.log('Queue resumed');
+}
+
+function stopQueue() {
+  isRunning = false;
+  isPaused = false;
+  if (currentJob) {
+    currentJob.status = 'cancelled';
+    addToHistory(currentJob);
+    currentJob = null;
+  }
+  broadcastState();
+  console.log('Queue stopped');
+}
+
+// ===========================
+// Auto Download Handler
+// ===========================
+
+async function downloadImage(imageUrl, jobId) {
+  try {
+    // Kiểm tra đã tải chưa
+    if (downloadedImages.has(imageUrl)) {
+      console.log('SKIP_DOWNLOAD: Image already downloaded:', imageUrl);
+      return { skipped: true, reason: 'already_downloaded' };
+    }
+
+    console.log('AUTO_DOWNLOAD:', imageUrl);
+
+    // Tạo filename an toàn
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const urlParts = imageUrl.split('/');
+    const originalName = urlParts[urlParts.length - 1].split('?')[0];
+    const extension = originalName.split('.').pop() || 'png';
+    
+    const safeFilename = `MJ_${timestamp}_${jobId.toString().slice(0, 8)}.${extension}`;
+    const downloadPath = `midjourney_downloads/${safeFilename}`;
+
+    const downloadId = await chrome.downloads.download({
+      url: imageUrl,
+      filename: downloadPath,
+      saveAs: false
+    });
+
+    console.log('Download started:', { downloadId, filename: safeFilename });
+
+    // Thêm vào set đã tải
+    downloadedImages.add(imageUrl);
+    saveState(); // Lưu ngay
+
+    // Theo dõi download completion
+    return new Promise((resolve, reject) => {
+      const listener = (delta) => {
+        if (delta.id === downloadId && delta.state) {
+          if (delta.state.current === 'complete') {
+            chrome.downloads.onChanged.removeListener(listener);
+            resolve({ downloadId, filename: safeFilename, imageUrl });
+          } else if (delta.state.current === 'interrupted') {
+            chrome.downloads.onChanged.removeListener(listener);
+            // Xóa khỏi set nếu download fail
+            downloadedImages.delete(imageUrl);
+            saveState();
+            reject(new Error('Download interrupted'));
+          }
+        }
+      };
+      chrome.downloads.onChanged.addListener(listener);
+
+      // Timeout sau 60 giây
+      setTimeout(() => {
+        chrome.downloads.onChanged.removeListener(listener);
+        downloadedImages.delete(imageUrl);
+        saveState();
+        reject(new Error('Download timeout'));
+      }, 60000);
+    });
+
+  } catch (error) {
+    console.error('Download failed:', error);
+    throw error;
+  }
+}
+
+// ===========================
+// Message Handler
+// ===========================
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  console.log('Background received message:', message.type);
+
+  (async () => {
+    try {
+      switch (message.type) {
+        case 'ADD_JOB':
+          const job = addJob(message.job);
+          sendResponse({ success: true, job });
+          break;
+
+        case 'REMOVE_JOB':
+          const removed = removeJob(message.jobId);
+          sendResponse({ success: removed });
+          break;
+
+        case 'START_QUEUE':
+          await startQueue();
+          sendResponse({ success: true });
+          break;
+
+        case 'PAUSE_QUEUE':
+          pauseQueue();
+          sendResponse({ success: true });
+          break;
+
+        case 'RESUME_QUEUE':
+          resumeQueue();
+          sendResponse({ success: true });
+          break;
+
+        case 'STOP_QUEUE':
+          stopQueue();
+          sendResponse({ success: true });
+          break;
+
+        case 'CLEAR_QUEUE':
+          clearQueue();
+          sendResponse({ success: true });
+          break;
+
+        case 'GET_STATE':
+          sendResponse({
+            queue,
+            currentJob,
+            isRunning,
+            isPaused,
+            jobHistory: jobHistory.slice(0, 10),
+            downloadedCount: downloadedImages.size
+          });
+          break;
+
+        case 'CLEAR_DOWNLOADED_HISTORY':
+          downloadedImages.clear();
+          saveState();
+          sendResponse({ success: true, message: 'Downloaded history cleared' });
+          break;
+
+        case 'DOWNLOAD_IMAGE':
+          const result = await downloadImage(message.imageUrl, message.jobId);
+          sendResponse({ success: true, result });
+          break;
+
+        default:
+          sendResponse({ success: false, error: 'Unknown message type' });
+      }
+    } catch (error) {
+      console.error('Message handler error:', error);
+      sendResponse({ success: false, error: error.message });
+    }
+  })();
+
+  return true; // Keep channel open for async response
+});
+
+// ===========================
+// State Broadcasting
+// ===========================
+
+async function broadcastState() {
+  const state = {
+    queue,
+    currentJob,
+    isRunning,
+    isPaused,
+    queueLength: queue.length,
+    jobHistory: jobHistory.slice(0, 10)
+  };
+
+  // Broadcast đến tất cả tabs
+  const tabs = await chrome.tabs.query({ url: 'https://www.midjourney.com/*' });
+  for (const tab of tabs) {
+    try {
+      await chrome.tabs.sendMessage(tab.id, {
+        type: 'STATE_UPDATE',
+        state
+      });
+    } catch (error) {
+      // Tab có thể đã đóng
+    }
+  }
+}
+
+// ===========================
+// Utilities
+// ===========================
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// ===========================
+// Initialization
+// ===========================
+
+chrome.runtime.onInstalled.addListener(() => {
+  console.log('MJ Auto Batcher installed');
+  loadState();
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  console.log('MJ Auto Batcher started');
+  loadState();
+});
+
+// Load state khi service worker khởi động
+loadState();
+
+console.log('MJ Auto Batcher background script loaded');

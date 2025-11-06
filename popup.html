@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MJ Auto Batcher</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="popup-container">
+    <div class="popup-header">
+      <h1>🎨 MJ Auto Batcher</h1>
+      <p class="popup-subtitle">Batch processing for Midjourney</p>
+    </div>
+
+    <div class="popup-body">
+      <!-- Status -->
+      <div class="status-card">
+        <div class="status-row">
+          <span class="status-label">Status:</span>
+          <span id="popup-status" class="status-value">Idle</span>
+        </div>
+        <div class="status-row">
+          <span class="status-label">Queue:</span>
+          <span id="popup-queue-count" class="status-value">0 jobs</span>
+        </div>
+        <div class="status-row">
+          <span class="status-label">Current:</span>
+          <span id="popup-current" class="status-value">-</span>
+        </div>
+      </div>
+
+      <!-- Instructions -->
+      <div class="info-card">
+        <h3>📋 How to use:</h3>
+        <ol>
+          <li>Open <a href="https://www.midjourney.com/imagine" target="_blank">Midjourney</a></li>
+          <li>Click the floating button on the right</li>
+          <li>Add your prompts to the queue</li>
+          <li>Click "Start" to begin processing</li>
+          <li>Images will auto-download to:<br>
+            <code>Downloads/midjourney_downloads/</code>
+          </li>
+        </ol>
+      </div>
+
+      <!-- Quick Actions -->
+      <div class="actions-card">
+        <h3>⚡ Quick Actions:</h3>
+        <button id="popup-open-midjourney" class="btn btn-primary">
+          Open Midjourney
+        </button>
+        <button id="popup-refresh-state" class="btn btn-secondary">
+          Refresh State
+        </button>
+      </div>
+
+      <!-- Stats -->
+      <div class="stats-card">
+        <h3>📊 Statistics:</h3>
+        <div class="stats-grid">
+          <div class="stat-item">
+            <div class="stat-value" id="stat-completed">0</div>
+            <div class="stat-label">Completed</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-value" id="stat-failed">0</div>
+            <div class="stat-label">Failed</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-value" id="stat-pending">0</div>
+            <div class="stat-label">Pending</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="popup-footer">
+      <p>Made with 💜 for Midjourney users</p>
+      <p class="version">v1.0.0</p>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

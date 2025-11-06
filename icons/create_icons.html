@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Generate Icons</title>
+</head>
+<body>
+<canvas id="canvas16" width="16" height="16"></canvas>
+<canvas id="canvas32" width="32" height="32"></canvas>
+<canvas id="canvas128" width="128" height="128"></canvas>
+
+<script>
+// Function to draw icon
+function drawIcon(canvas, size) {
+  const ctx = canvas.getContext('2d');
+  
+  // Background gradient
+  const gradient = ctx.createLinearGradient(0, 0, size, size);
+  gradient.addColorStop(0, '#667eea');
+  gradient.addColorStop(1, '#764ba2');
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, size, size);
+  
+  // Draw list icon
+  const padding = size * 0.2;
+  const lineHeight = size * 0.15;
+  const gap = size * 0.1;
+  
+  ctx.fillStyle = 'white';
+  ctx.strokeStyle = 'white';
+  ctx.lineWidth = Math.max(2, size / 32);
+  
+  // Three lines
+  for (let i = 0; i < 3; i++) {
+    const y = padding + (lineHeight + gap) * i;
+    ctx.fillRect(padding, y, size - padding * 2, lineHeight);
+  }
+}
+
+// Draw all sizes
+drawIcon(document.getElementById('canvas16'), 16);
+drawIcon(document.getElementById('canvas32'), 32);
+drawIcon(document.getElementById('canvas128'), 128);
+
+// Download function
+function downloadCanvas(canvasId, filename) {
+  const canvas = document.getElementById(canvasId);
+  const link = document.createElement('a');
+  link.download = filename;
+  link.href = canvas.toDataURL('image/png');
+  link.click();
+}
+
+// Auto download after 1 second
+setTimeout(() => {
+  downloadCanvas('canvas16', 'icon16.png');
+  setTimeout(() => downloadCanvas('canvas32', 'icon32.png'), 500);
+  setTimeout(() => downloadCanvas('canvas128', 'icon128.png'), 1000);
+}, 1000);
+</script>
+</body>
+</html>
