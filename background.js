@@ -123,83 +123,131 @@ async function startQueue() {
   await processQueue();
 }
 
+// ===========================
+// Settings
+// ===========================
+
+let settings = {
+    // Text→Image Settings
+    t2i_sendsPerRound: 3,
+    t2i_roundInterval: 2 * 60 * 1000, // 2 minutes
+    t2i_promptInterval: 30 * 1000, // 30 seconds
+};
+
+async function loadSettings() {
+    const data = await chrome.storage.local.get('settings');
+    if (data.settings) {
+        settings = { ...settings, ...data.settings };
+    }
+}
+
+async function saveSettings() {
+    await chrome.storage.local.set({ settings });
+}
+
 async function processQueue() {
-  while (isRunning && queue.length > 0) {
-    if (isPaused) {
-      await sleep(1000);
-      continue;
+    let roundJobCount = 0;
+
+    while (isRunning && queue.length > 0) {
+        if (isPaused) {
+            await sleep(1000);
+            continue;
+        }
+
+        // Check if we need to start a new round
+        if (roundJobCount >= settings.t2i_sendsPerRound) {
+            console.log(`🏁 Round complete. Waiting for ${settings.t2i_roundInterval / 1000}s...`);
+            await sleep(settings.t2i_roundInterval);
+            roundJobCount = 0;
+        }
+
+        currentJob = queue[0];
+
+        // We only apply round logic to text2image jobs
+        if (currentJob.type !== 'text2image') {
+            await processSingleJob(currentJob);
+            continue;
+        }
+
+        currentJob.status = 'processing';
+        broadcastState();
+
+        try {
+            console.log('Processing job:', currentJob);
+
+            // Gửi job đến content script
+            const tabs = await chrome.tabs.query({
+                url: 'https://www.midjourney.com/*',
+                active: true
+            });
+
+            if (tabs.length === 0) {
+                throw new Error('No active Midjourney tab found. Please open https://www.midjourney.com/imagine');
+            }
+
+            const tab = tabs[0];
+
+            await chrome.tabs.sendMessage(tab.id, {
+                type: 'EXECUTE_JOB',
+                job: currentJob
+            });
+
+            await waitForJobCompletion(currentJob.id);
+
+            // Job thành công
+            currentJob.status = 'completed';
+            addToHistory(currentJob);
+            queue.shift();
+            saveState();
+            roundJobCount++;
+
+            console.log(`✅ Job ${currentJob.id} completed.`);
+
+            if (queue.length > 0 && roundJobCount < settings.t2i_sendsPerRound) {
+                console.log(`⏳ Waiting for prompt interval: ${settings.t2i_promptInterval / 1000}s`);
+                await sleep(settings.t2i_promptInterval);
+            }
+
+        } catch (error) {
+            console.error('Job failed:', error);
+            currentJob.status = 'failed';
+            currentJob.error = error.message;
+            addToHistory(currentJob);
+            queue.shift();
+            saveState();
+        }
+
+        broadcastState();
     }
 
-    currentJob = queue[0];
-    currentJob.status = 'processing';
+    isRunning = false;
+    currentJob = null;
+    broadcastState();
+    console.log('Queue processing completed');
+}
+
+async function processSingleJob(job) {
+    job.status = 'processing';
     broadcastState();
 
     try {
-      console.log('Processing job:', currentJob);
-      
-      // Gửi job đến content script
-      const tabs = await chrome.tabs.query({ 
-        url: 'https://www.midjourney.com/*',
-        active: true 
-      });
+        const tabs = await chrome.tabs.query({ url: 'https://www.midjourney.com/*', active: true });
+        if (tabs.length === 0) throw new Error('No active Midjourney tab found');
 
-      if (tabs.length === 0) {
-        throw new Error('No active Midjourney tab found. Please open https://www.midjourney.com/imagine');
-      }
+        await chrome.tabs.sendMessage(tabs[0].id, { type: 'EXECUTE_JOB', job });
+        await waitForJobCompletion(job.id);
 
-      const tab = tabs[0];
-      
-      // Gửi message đến content script với better error handling
-      try {
-        const response = await chrome.tabs.sendMessage(tab.id, {
-          type: 'EXECUTE_JOB',
-          job: currentJob
-        });
-        
-        // Check if response indicates immediate failure
-        if (response && !response.success) {
-          throw new Error(response.error || 'Job execution failed');
-        }
-      } catch (sendError) {
-        // If message send fails, don't fail the job yet
-        // The job might still complete via JOB_COMPLETED message
-        console.warn('Message send error (may be normal for long jobs):', sendError.message);
-      }
-
-      // Đợi kết quả (via JOB_COMPLETED or JOB_FAILED messages)
-      await waitForJobCompletion(currentJob.id);
-
-      // Job thành công
-      currentJob.status = 'completed';
-      addToHistory(currentJob);
-      queue.shift();
-      saveState();
-
-      console.log('Job completed:', currentJob.id);
-
-      // Random delay trước khi job tiếp theo (tránh bị detect)
-      if (queue.length > 0) {
-        const delay = getRandomDelay();
-        console.log(`⏳ Waiting ${delay}ms before next job...`);
-        await sleep(delay);
-      }
-
+        job.status = 'completed';
     } catch (error) {
-      console.error('Job failed:', error);
-      currentJob.status = 'failed';
-      currentJob.error = error.message;
-      addToHistory(currentJob);
-      queue.shift();
-      saveState();
+        console.error('Single job failed:', error);
+        job.status = 'failed';
+        job.error = error.message;
+    } finally {
+        addToHistory(job);
+        queue.shift();
+        saveState();
+        broadcastState();
     }
-
-    broadcastState();
-  }
-
-  isRunning = false;
-  currentJob = null;
-  broadcastState();
-  console.log('Queue processing completed');
 }
 
 function waitForJobCompletion(jobId, timeout = 120000) {
@@ -258,21 +306,22 @@ function stopQueue() {
 
 async function downloadImage(imageUrl, jobId) {
   try {
+    const url = new URL(imageUrl);
+    const cleanUrl = `${url.origin}${url.pathname}`;
+
     // Kiểm tra đã tải chưa
-    if (downloadedImages.has(imageUrl)) {
-      console.log('SKIP_DOWNLOAD: Image already downloaded:', imageUrl);
+    if (downloadedImages.has(cleanUrl)) {
+      console.log('SKIP_DOWNLOAD: Image already downloaded:', cleanUrl);
       return { skipped: true, reason: 'already_downloaded' };
     }
 
-    console.log('AUTO_DOWNLOAD:', imageUrl);
+    console.log('AUTO_DOWNLOAD:', cleanUrl);
 
     // Tạo filename an toàn
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    const urlParts = imageUrl.split('/');
-    const originalName = urlParts[urlParts.length - 1].split('?')[0];
-    const extension = originalName.split('.').pop() || 'png';
+    const extension = cleanUrl.split('.').pop() || 'png';
     
-    const safeFilename = `MJ_${timestamp}_${jobId.toString().slice(0, 8)}.${extension}`;
+    const safeFilename = `${timestamp}_${jobId.toString().slice(0, 8)}.${extension}`;
     const downloadPath = `midjourney_downloads/${safeFilename}`;
 
     const downloadId = await chrome.downloads.download({
@@ -284,8 +333,8 @@ async function downloadImage(imageUrl, jobId) {
     console.log('Download started:', { downloadId, filename: safeFilename });
 
     // Thêm vào set đã tải
-    downloadedImages.add(imageUrl);
-    saveState(); // Lưu ngay
+    downloadedImages.add(cleanUrl);
+    await saveState(); // Lưu ngay
 
     // Theo dõi download completion
     return new Promise((resolve, reject) => {
@@ -297,7 +346,7 @@ async function downloadImage(imageUrl, jobId) {
           } else if (delta.state.current === 'interrupted') {
             chrome.downloads.onChanged.removeListener(listener);
             // Xóa khỏi set nếu download fail
-            downloadedImages.delete(imageUrl);
+            downloadedImages.delete(cleanUrl);
             saveState();
             reject(new Error('Download interrupted'));
           }
@@ -308,7 +357,7 @@ async function downloadImage(imageUrl, jobId) {
       // Timeout sau 60 giây
       setTimeout(() => {
         chrome.downloads.onChanged.removeListener(listener);
-        downloadedImages.delete(imageUrl);
+        downloadedImages.delete(cleanUrl);
         saveState();
         reject(new Error('Download timeout'));
       }, 60000);
