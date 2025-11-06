@@ -191,6 +191,42 @@ async function clickStartingFrameButton() {
   }
 }
 
+function findInputInShadowDom(rootNode) {
+    // 1. Search in the current root node (light DOM)
+    const mainInputs = rootNode.querySelectorAll('input[type="file"]');
+    for (const input of mainInputs) {
+        if (!input.closest('#mj-auto-batcher-panel')) {
+            console.log('Found input in light DOM:', input);
+            return input;
+        }
+    }
+
+    // 2. Walk through all elements to find shadow roots
+    const allElements = rootNode.querySelectorAll('*');
+    for (const element of allElements) {
+        if (element.shadowRoot) {
+            // Recurse into the shadow root
+            const inputInShadow = findInputInShadowDom(element.shadowRoot);
+            if (inputInShadow) {
+                 console.log('Found input in Shadow DOM of:', element);
+                return inputInShadow;
+            }
+        }
+    }
+
+    return null;
+}
+
+async function imageDataToFile(imageData, fileName) {
+    if (typeof imageData === 'string') {
+        const blob = await fetch(imageData).then(r => r.blob());
+        return new File([blob], fileName, { type: blob.type });
+    } else if (imageData instanceof Blob) {
+        return new File([imageData], fileName, { type: imageData.type });
+    }
+    throw new Error('Invalid image data format');
+}
+
 async function uploadImage(imageData, fileName) {
   try {
     console.log('🖼️ Uploading image for Image→Video:', fileName);
@@ -200,34 +236,10 @@ async function uploadImage(imageData, fileName) {
     await ensureStartingFrameOpen();
     await sleep(1000); // Wait for panel to fully open and input to appear
 
-    // STEP 1: Find Midjourney's file input
-    let fileInput = null;
+    // STEP 1: Find Midjourney's file input (with Shadow DOM support)
+    console.log('🔍 Looking for Midjourney file input (including Shadow DOM)...');
     
-    console.log('🔍 Looking for Midjourney file input...');
-    
-    // Get ALL file inputs
-    const allInputs = document.querySelectorAll('input[type="file"]');
-    console.log(`📋 Found ${allInputs.length} file inputs total`);
-    
-    for (const input of allInputs) {
-      const inputId = input.id || '';
-      const inputClass = input.className || '';
-      const inputAccept = input.accept || '';
-      
-      // Log each input for debugging
-      console.log(`  Input: id="${inputId}", class="${inputClass}", accept="${inputAccept}"`);
-      
-      // Skip extension's own inputs (our inputs all start with 'mj-')
-      if (inputId.startsWith('mj-') || input.closest('#mj-auto-batcher-panel')) {
-        console.log('  ⏭️ Skipping extension input');
-        continue;
-      }
-      
-      // This is Midjourney's input!
-      fileInput = input;
-      console.log('  ✅ This is Midjourney\'s input!');
-      break;
-    }
+    const fileInput = findInputInShadowDom(document.body);
 
     if (!fileInput) {
       throw new Error('❌ Cannot find Midjourney file input. Starting Frame may not be open or Midjourney UI changed.');
@@ -240,15 +252,7 @@ async function uploadImage(imageData, fileName) {
     console.log('   - Multiple:', fileInput.multiple);
 
     // STEP 2: Convert imageData to File object
-    let file;
-    if (typeof imageData === 'string') {
-      const blob = await fetch(imageData).then(r => r.blob());
-      file = new File([blob], fileName, { type: blob.type });
-    } else if (imageData instanceof Blob) {
-      file = new File([imageData], fileName, { type: imageData.type });
-    } else {
-      throw new Error('Invalid image data format');
-    }
+    const file = await imageDataToFile(imageData, fileName);
 
     console.log('📦 Created file object:', file.name, file.size, 'bytes');
 
